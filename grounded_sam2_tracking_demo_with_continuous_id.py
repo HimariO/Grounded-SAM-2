@@ -18,7 +18,8 @@ import copy
 Step 1: Environment settings and model initialization
 """
 # use bfloat16 for the entire notebook
-torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+torch.autocast(device_type="cuda", dtype=torch.float16).__enter__()
+torch.inference_mode().__enter__()
 
 if torch.cuda.get_device_properties(0).major >= 8:
     # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
@@ -26,12 +27,13 @@ if torch.cuda.get_device_properties(0).major >= 8:
     torch.backends.cudnn.allow_tf32 = True
 
 # init sam image predictor and video predictor model
-sam2_checkpoint = "./checkpoints/sam2_hiera_large.pt"
-model_cfg = "sam2_hiera_l.yaml"
+sam2_checkpoint = "./checkpoints/sam2_hiera_tiny.pt"
+model_cfg = "sam2_hiera_t.yaml"
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print("config", model_cfg)
 print("device", device)
 
-video_predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint)
+video_predictor = build_sam2_video_predictor("sam2_hiera_t_480.yaml", sam2_checkpoint)
 sam2_image_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
 image_predictor = SAM2ImagePredictor(sam2_image_model)
 
@@ -115,6 +117,7 @@ for start_frame_idx in range(0, len(frame_names), step):
         box=input_boxes,
         multimask_output=False,
     )
+    # breakpoint()
     # convert the mask shape to (n, H, W)
     if masks.ndim == 2:
         masks = masks[None]
@@ -129,7 +132,11 @@ for start_frame_idx in range(0, len(frame_names), step):
 
     # If you are using point prompts, we uniformly sample positive points based on the mask
     if mask_dict.promote_type == "mask":
-        mask_dict.add_new_frame_annotation(mask_list=torch.tensor(masks).to(device), box_list=torch.tensor(input_boxes), label_list=OBJECTS)
+        mask_dict.add_new_frame_annotation(
+            mask_list=torch.tensor(masks).to(device), 
+            box_list=torch.tensor(input_boxes), 
+            label_list=OBJECTS
+        )
     else:
         raise NotImplementedError("SAM 2 video predictor only support mask prompts")
 
@@ -137,7 +144,7 @@ for start_frame_idx in range(0, len(frame_names), step):
     """
     Step 4: Propagate the video predictor to get the segmentation results for each frame
     """
-    objects_count = mask_dict.update_masks(tracking_annotation_dict=sam2_masks, iou_threshold=0.8, objects_count=objects_count)
+    objects_count = mask_dict.update_masks(tracking_annotation_dict=sam2_masks, iou_threshold=0.4, objects_count=objects_count)
     print("objects_count", objects_count)
     video_predictor.reset_state(inference_state)
     if len(mask_dict.labels) == 0:
