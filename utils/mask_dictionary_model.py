@@ -109,6 +109,115 @@ class MaskDictionaryModel:
 
 
 @dataclass
+class BoxDictionaryModel:
+    box_name: str = ""
+    image_height: int = 1080
+    image_width: int = 1920
+    promote_type: str = "bbox"
+    labels: dict = field(default_factory=dict)
+
+    def add_new_frame_annotation(self, box_list, label_list):
+        anno_2d = {}
+        for idx, (box, label) in enumerate(zip(box_list, label_list)):
+            final_index = idx + 1
+            name = label
+
+            new_annotation = ObjectInfo(
+                instance_id=final_index,
+                class_name=name,
+                x1=box[0],
+                y1=box[1],
+                x2=box[2],
+                y2=box[3]
+            )
+            anno_2d[final_index] = new_annotation
+
+        self.labels = anno_2d
+
+    def update_boxes(self, tracking_annotation_dict, iou_threshold=0.8, objects_count=0):
+        updated_boxes = {}
+
+        for box_obj_id, box_info in self.labels.items():
+            flag = 0
+            new_box_copy = ObjectInfo()
+            if (box_info.x2 - box_info.x1) * (box_info.y2 - box_info.y1) == 0:
+                continue
+
+            for object_id, object_info in tracking_annotation_dict.labels.items():
+                iou = self.calculate_iou(box_info, object_info)
+                if iou > iou_threshold:
+                    flag = object_info.instance_id
+                    new_box_copy.instance_id = object_info.instance_id
+                    new_box_copy.class_name = box_info.class_name
+                    new_box_copy.x1 = box_info.x1
+                    new_box_copy.y1 = box_info.y1
+                    new_box_copy.x2 = box_info.x2
+                    new_box_copy.y2 = box_info.y2
+                    break
+
+            if not flag:
+                objects_count += 1
+                flag = objects_count
+                new_box_copy.instance_id = objects_count
+                new_box_copy.class_name = box_info.class_name
+                new_box_copy.x1 = box_info.x1
+                new_box_copy.y1 = box_info.y1
+                new_box_copy.x2 = box_info.x2
+                new_box_copy.y2 = box_info.y2
+            updated_boxes[flag] = new_box_copy
+        self.labels = updated_boxes
+        return objects_count
+
+    def get_target_class_name(self, instance_id):
+        return self.labels[instance_id].class_name
+
+    def get_target_logit(self, instance_id):
+        return self.labels[instance_id].logit
+
+    @staticmethod
+    def calculate_iou(box1, box2):
+        # Calculate intersection
+        xA = max(box1.x1, box2.x1)
+        yA = max(box1.y1, box2.y1)
+        xB = min(box1.x2, box2.x2)
+        yB = min(box1.y2, box2.y2)
+        interArea = max(0, xB - xA) * max(0, yB - yA)
+
+        # Calculate union
+        box1Area = (box1.x2 - box1.x1) * (box1.y2 - box1.y1)
+        box2Area = (box2.x2 - box2.x1) * (box2.y2 - box2.y1)
+        unionArea = box1Area + box2Area - interArea
+
+        # Calculate IoU
+        iou = interArea / unionArea
+        return iou
+
+    def to_dict(self):
+        return {
+            "box_name": self.box_name,
+            "image_height": self.image_height,
+            "image_width": self.image_width,
+            "promote_type": self.promote_type,
+            "labels": {k: v.to_dict() for k, v in self.labels.items()}
+        }
+
+    def to_json(self, json_file):
+        with open(json_file, "w") as f:
+            json.dump(self.to_dict(), f, indent=4)
+
+    def from_json(self, json_file):
+        with open(json_file, "r") as f:
+            data = json.load(f)
+            self.box_name = data["box_name"]
+            self.image_height = data["image_height"]
+            self.image_width = data["image_width"]
+            self.promote_type = data["promote_type"]
+            self.labels = {int(k): ObjectInfo(**v) for k, v in data["labels"].items()}
+        return self
+
+
+
+@dataclass
 class ObjectInfo:
     instance_id:int = 0
     mask: any = None
@@ -126,19 +235,15 @@ class ObjectInfo:
         return self.instance_id
 
     def update_box(self):
-        # 找到所有非零值的索引
         nonzero_indices = torch.nonzero(self.mask)
         
-        # 如果没有非零值，返回一个空的边界框
         if nonzero_indices.size(0) == 0:
-            # print("nonzero_indices", nonzero_indices)
             return []
         
-        # 计算最小和最大索引
         y_min, x_min = torch.min(nonzero_indices, dim=0)[0]
         y_max, x_max = torch.max(nonzero_indices, dim=0)[0]
         
-        # 创建边界框 [x_min, y_min, x_max, y_max]
+        # [x_min, y_min, x_max, y_max]
         bbox = [x_min.item(), y_min.item(), x_max.item(), y_max.item()]        
         self.x1 = bbox[0]
         self.y1 = bbox[1]
