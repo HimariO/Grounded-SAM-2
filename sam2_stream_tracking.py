@@ -4,7 +4,7 @@ import torch
 import numpy as np
 import supervision as sv
 from PIL import Image
-from sam2.build_sam import build_sam2_video_predictor, build_sam2
+from sam2.build_sam import build_sam2_camera_predictor, build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection 
 from utils.track_utils import sample_points_from_masks
@@ -33,7 +33,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print("config", model_cfg)
 print("device", device)
 
-video_predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint)
+video_predictor = build_sam2_camera_predictor(model_cfg, sam2_checkpoint)
 # sam2_image_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
 # image_predictor = SAM2ImagePredictor(sam2_image_model)
 
@@ -69,7 +69,7 @@ frame_names = [
 frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
 # init video predictor state
-inference_state = video_predictor.init_state(video_path=video_dir, offload_video_to_cpu=True, async_loading_frames=True)
+# inference_state = video_predictor.init_state(video_path=video_dir, offload_video_to_cpu=True, async_loading_frames=True)
 step = 20 # the step to sample frames for Grounding DINO predictor
 
 sam2_masks = BoxDictionaryModel()
@@ -126,22 +126,33 @@ for start_frame_idx in range(0, len(frame_names), step):
     """
     objects_count = mask_dict.update_boxes(tracking_annotation_dict=sam2_masks, iou_threshold=0.4, objects_count=objects_count)
     print("objects_count", objects_count)
-    video_predictor.reset_state(inference_state)
+    # video_predictor.reset_state(inference_state)
     if len(mask_dict.labels) == 0:
         print("No object detected in the frame, skip the frame {}".format(start_frame_idx))
         continue
-    video_predictor.reset_state(inference_state)
 
+    video_segments = {}  # output the following {step} frames tracking masks
+
+    frame_path = os.path.join(video_dir, frame_names[start_frame_idx])
+    frame = cv2.imread(frame_path)
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    video_predictor.load_first_frame(frame)
+    
+    first_frame_masks = BoxDictionaryModel()
     for object_id, object_info in mask_dict.labels.items():
-        frame_idx, out_obj_ids, out_mask_logits = video_predictor.add_new_points_or_box(
-                inference_state,
-                start_frame_idx,
-                object_id,
-                box=[object_info.x1, object_info.y1, object_info.x2, object_info.y2],
+        frame_idx, out_obj_ids, out_mask_logits = video_predictor.add_new_prompt(
+                frame_idx=0,
+                obj_id=object_id,
+                bbox=[[object_info.x1, object_info.y1], [object_info.x2, object_info.y2]],
             )
     
-    video_segments = {}  # output the following {step} frames tracking masks
-    for out_frame_idx, out_obj_ids, out_mask_logits in video_predictor.propagate_in_video(inference_state, max_frame_num_to_track=step, start_frame_idx=start_frame_idx):
+    # for out_frame_idx, out_obj_ids, out_mask_logits in video_predictor.propagate_in_video(inference_state, max_frame_num_to_track=step, start_frame_idx=start_frame_idx):
+    for fid in range(start_frame_idx + 1, min(start_frame_idx + step, len(frame_names))):
+        frame_path = os.path.join(video_dir, frame_names[fid])
+        frame = cv2.imread(frame_path)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        out_obj_ids, out_mask_logits = video_predictor.track(frame)
+
         frame_masks = BoxDictionaryModel()
         
         for i, out_obj_id in enumerate(out_obj_ids):
@@ -149,12 +160,12 @@ for start_frame_idx in range(0, len(frame_names), step):
             object_info = ObjectInfo(instance_id = out_obj_id, mask = out_mask[0], class_name = mask_dict.get_target_class_name(out_obj_id))
             object_info.update_box()
             frame_masks.labels[out_obj_id] = object_info
-            image_base_name = frame_names[out_frame_idx].split(".")[0]
+            image_base_name = frame_names[fid].split(".")[0]
             frame_masks.box_name = f"mask_{image_base_name}.npy"
             frame_masks.image_height = out_mask.shape[-2]
             frame_masks.image_width = out_mask.shape[-1]
 
-        video_segments[out_frame_idx] = frame_masks
+        video_segments[fid] = frame_masks
         sam2_masks = copy.deepcopy(frame_masks)
 
     print("video_segments:", len(video_segments))
