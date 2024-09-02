@@ -64,17 +64,17 @@ class SAM2CameraPredictor(SAM2Base):
         return img, width, height
 
     @torch.inference_mode()
-    def load_first_frame(self, img):
+    def load_first_frame(self, img, frame_idx=0):
 
         self.condition_state = self._init_state(
             offload_video_to_cpu=False, offload_state_to_cpu=False
         )
         img, width, height = self.perpare_data(img, image_size=self.image_size)
-        self.condition_state["images"] = [img]
+        self.condition_state["images"] = {frame_idx: img}
         self.condition_state["num_frames"] = len(self.condition_state["images"])
         self.condition_state["video_height"] = height
         self.condition_state["video_width"] = width
-        self._get_image_feature(frame_idx=0, batch_size=1)
+        self._get_image_feature(frame_idx=frame_idx, batch_size=1)
 
     def add_conditioning_frame(self, img):
         img, width, height = self.perpare_data(img, image_size=self.image_size)

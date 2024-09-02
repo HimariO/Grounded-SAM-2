@@ -70,7 +70,7 @@ frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
 # init video predictor state
 # inference_state = video_predictor.init_state(video_path=video_dir, offload_video_to_cpu=True, async_loading_frames=True)
-step = 20 # the step to sample frames for Grounding DINO predictor
+step = 10 # the step to sample frames for Grounding DINO predictor
 
 sam2_masks = BoxDictionaryModel()
 PROMPT_TYPE_FOR_VIDEO = "mask" # box, mask or point
@@ -141,20 +141,21 @@ for start_frame_idx in range(0, len(frame_names), step):
     first_frame_masks = BoxDictionaryModel()
     for object_id, object_info in mask_dict.labels.items():
         frame_idx, out_obj_ids, out_mask_logits = video_predictor.add_new_prompt(
-                frame_idx=0,
-                obj_id=object_id,
-                bbox=[[object_info.x1, object_info.y1], [object_info.x2, object_info.y2]],
-            )
-    
+            frame_idx=0,
+            obj_id=object_id,
+            bbox=[[object_info.x1, object_info.y1], [object_info.x2, object_info.y2]],
+        )
+        print('add_new_prompt', out_obj_ids)
+
     # for out_frame_idx, out_obj_ids, out_mask_logits in video_predictor.propagate_in_video(inference_state, max_frame_num_to_track=step, start_frame_idx=start_frame_idx):
     for fid in range(start_frame_idx + 1, min(start_frame_idx + step, len(frame_names))):
         frame_path = os.path.join(video_dir, frame_names[fid])
         frame = cv2.imread(frame_path)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
         out_obj_ids, out_mask_logits = video_predictor.track(frame)
 
         frame_masks = BoxDictionaryModel()
-        
         for i, out_obj_id in enumerate(out_obj_ids):
             out_mask = (out_mask_logits[i] > 0.0) # .cpu().numpy()
             object_info = ObjectInfo(instance_id = out_obj_id, mask = out_mask[0], class_name = mask_dict.get_target_class_name(out_obj_id))
