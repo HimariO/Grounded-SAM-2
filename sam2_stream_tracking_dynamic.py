@@ -6,6 +6,7 @@ import supervision as sv
 from PIL import Image
 from sam2.build_sam import build_sam2_camera_predictor, build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
+from sam2.sam2_camera_predictor import SAM2CameraPredictor
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection 
 from utils.track_utils import sample_points_from_masks
 from utils.video_utils import create_video_from_images
@@ -13,13 +14,14 @@ from utils.common_utils import CommonUtils
 from utils.mask_dictionary_model import BoxDictionaryModel, ObjectInfo
 import json
 import copy
+from pprint import pprint
 
 """
 Step 1: Environment settings and model initialization
 """
 # use bfloat16 for the entire notebook
 torch.autocast(device_type="cuda", dtype=torch.float16).__enter__()
-torch.inference_mode().__enter__()
+torch.no_grad().__enter__()
 
 if torch.cuda.get_device_properties(0).major >= 8:
     # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
@@ -97,6 +99,70 @@ def object_detect(image):
     return input_boxes, OBJECTS
 
 
+def backfill_sam2_mem(predictor: SAM2CameraPredictor, frame: np.ndarray, mask_dict, out_obj_ids):
+    "maskmem_features"
+    non_cond_frame_outputs = predictor.condition_state["output_dict"]['non_cond_frame_outputs']
+    non_cond_frame_outputs = {k: v for k, v in non_cond_frame_outputs.items()} # shallow copy
+    predictor.load_first_frame(frame, frame_idx=fid, init_state=False)
+
+    objects_count = predictor._get_obj_num()
+    input_boxes, OBJECTS = object_detect(Image.fromarray(frame))
+    tmp_dict = BoxDictionaryModel()
+    tmp_dict.add_new_frame_annotation(
+        box_list=torch.tensor(input_boxes), 
+        label_list=OBJECTS
+    )
+    objects_count = tmp_dict.update_boxes(
+        tracking_annotation_dict=mask_dict, 
+        iou_threshold=0.4, 
+        objects_count=objects_count, 
+        keep_new=True
+    )
+    # mask_dict = tmp_dict
+    
+    for object_id, object_info in mask_dict.labels.items():
+        if object_id in out_obj_ids:
+            continue
+        frame_idx, out_obj_ids, out_mask_logits = video_predictor.add_new_prompt(
+            frame_idx=fid,
+            obj_id=object_id,
+            bbox=[[object_info.x1, object_info.y1], [object_info.x2, object_info.y2]],
+        )
+    print("objects_count", objects_count)
+
+    for storage in ['cond_frame_outputs', 'non_cond_frame_outputs']:
+        cond_outputs = predictor.condition_state["output_dict"][storage]
+        obj_num = predictor._get_obj_num()
+        for t, out in cond_outputs.items():
+            dummy_ptr = predictor._get_empty_mask_ptr(0)
+            if obj_num - out["obj_ptr"].shape[0] > 0:
+                dummy_ptr = dummy_ptr.expand(obj_num - out["obj_ptr"].shape[0], -1)
+                out["obj_ptr"] = torch.cat([out["obj_ptr"], dummy_ptr])
+
+                n, c, h, w = out["maskmem_features"].shape
+                dummy = torch.zeros(
+                    [obj_num - n, c, h, w], 
+                    dtype=out["maskmem_features"].dtype, 
+                    device=out["maskmem_features"].device
+                )
+                out["maskmem_features"] = torch.cat([out["maskmem_features"], dummy])
+                
+                for i, ten in enumerate(out["maskmem_pos_enc"]):
+                    n, c, h, w = ten.shape
+                    dummy = torch.zeros(
+                        [obj_num - n, c, h, w], 
+                        dtype=ten.dtype, 
+                        device=ten.device
+                    )
+                    out["maskmem_pos_enc"][i] = torch.cat([ten, dummy])        
+    
+    # predictor.condition_state['images'][fid] = frame
+    # predictor.condition_state["output_dict"]['non_cond_frame_outputs'] = non_cond_frame_outputs
+    # predictor.frame_idx = max(non_cond_frame_outputs.keys())
+    # predictor.propagate_in_video_preflight()
+    return tmp_dict
+
+
 """
 Step 2: Prompt Grounding DINO and SAM image predictor to get the box and mask for all frames
 """
@@ -160,41 +226,27 @@ for start_frame_idx in range(0, len(frame_names), step):
         frame = cv2.imread(frame_path)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        if fid % 10 == 0:
-            non_cond_frame_outputs = video_predictor.condition_state["output_dict"]['non_cond_frame_outputs']
-            non_cond_frame_outputs = {k: v for k, v in non_cond_frame_outputs.items()} # shallow copy
-            video_predictor.load_first_frame(frame, frame_idx=fid)
-            # video_predictor.condition_state['images'][fid] = frame
-            video_predictor.condition_state["output_dict"]['non_cond_frame_outputs'] = non_cond_frame_outputs
-            video_predictor.frame_idx = max(non_cond_frame_outputs.keys())
-
-            input_boxes, OBJECTS = object_detect(Image.fromarray(frame))
-            
-            tmp_dict = BoxDictionaryModel()
-            tmp_dict.add_new_frame_annotation(
-                box_list=torch.tensor(input_boxes), 
-                label_list=OBJECTS
-            )
-            objects_count = tmp_dict.update_boxes(tracking_annotation_dict=mask_dict, iou_threshold=0.4, objects_count=objects_count)
-            mask_dict = tmp_dict
-            
-            for object_id, object_info in mask_dict.labels.items():
-                if object_id in out_obj_ids:
-                    continue
-                
-                frame_idx, out_obj_ids, out_mask_logits = video_predictor.add_new_prompt(
-                    frame_idx=fid,
-                    obj_id=object_id,
-                    bbox=[[object_info.x1, object_info.y1], [object_info.x2, object_info.y2]],
-                )
-            print("objects_count", objects_count)
+        if fid % 10 == 0 and fid > 0:
+            """
+            TODO:
+                Find where to update `video_predictor.condition_state['cond_frame_outputs']` to right the
+                number of objects after we insert new object.
+            """
+            mask_dict = backfill_sam2_mem(video_predictor, frame, mask_dict, out_obj_ids)
         else:
             out_obj_ids, out_mask_logits = video_predictor.track(frame)
+        
+        print(f"[{fid}]")
+        pprint(video_predictor.condition_state['output_dict_per_obj'].keys())
 
         frame_masks = BoxDictionaryModel()
         for i, out_obj_id in enumerate(out_obj_ids):
             out_mask = (out_mask_logits[i] > 0.0) # .cpu().numpy()
-            object_info = ObjectInfo(instance_id = out_obj_id, mask = out_mask[0], class_name = mask_dict.get_target_class_name(out_obj_id))
+            object_info = ObjectInfo(
+                instance_id = out_obj_id, 
+                mask = out_mask[0], 
+                class_name = mask_dict.get_target_class_name(out_obj_id)
+            )
             object_info.update_box()
             frame_masks.labels[out_obj_id] = object_info
             image_base_name = frame_names[fid].split(".")[0]

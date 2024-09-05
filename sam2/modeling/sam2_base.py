@@ -521,7 +521,7 @@ class SAM2Base(torch.nn.Module):
             # when getting temporal positional embedding below)
             assert len(output_dict["cond_frame_outputs"]) > 0
             # Select a maximum number of temporally closest cond frames for cross attention
-            cond_outputs = output_dict["cond_frame_outputs"]
+            cond_outputs = output_dict["cond_frame_outputs"]  # BUG: num object here don't match `B`
             selected_cond_outputs, unselected_cond_outputs = select_closest_cond_frames(
                 frame_idx, cond_outputs, self.max_cond_frames_in_attn
             )
@@ -740,7 +740,7 @@ class SAM2Base(torch.nn.Module):
                 pix_feat, high_res_features, mask_inputs
             )
         else:
-            # fused the visual feature with previous memory features in the memory bank
+            # fused the visual feature with previous memory features in the memory bank, (num_objs, 256, h, w)
             pix_feat_with_mem = self._prepare_memory_conditioned_features(
                 frame_idx=frame_idx,
                 is_init_cond_frame=is_init_cond_frame,

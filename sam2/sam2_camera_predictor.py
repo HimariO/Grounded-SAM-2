@@ -63,14 +63,18 @@ class SAM2CameraPredictor(SAM2Base):
         img /= img_std
         return img, width, height
 
-    @torch.inference_mode()
-    def load_first_frame(self, img, frame_idx=0):
-
-        self.condition_state = self._init_state(
-            offload_video_to_cpu=False, offload_state_to_cpu=False
-        )
+    @torch.no_grad()
+    def load_first_frame(self, img, frame_idx=0, init_state=True):
         img, width, height = self.perpare_data(img, image_size=self.image_size)
-        self.condition_state["images"] = {frame_idx: img}
+        
+        if init_state:
+            self.condition_state = self._init_state(
+                offload_video_to_cpu=False, offload_state_to_cpu=False
+            )
+            self.condition_state["images"] = {frame_idx: img}
+        else:
+            self.condition_state["images"][frame_idx] = img
+        
         self.condition_state["num_frames"] = len(self.condition_state["images"])
         self.condition_state["video_height"] = height
         self.condition_state["video_width"] = width
@@ -146,7 +150,8 @@ class SAM2CameraPredictor(SAM2Base):
 
         # This is a new object id not sent to the server before. We only allow adding
         # new objects *before* the tracking starts.
-        allow_new_object = not self.condition_state["tracking_has_started"]
+        # allow_new_object = not self.condition_state["tracking_has_started"]
+        allow_new_object = True # HACK
         if allow_new_object:
             # get the next object slot
             obj_idx = len(self.condition_state["obj_id_to_idx"])
@@ -947,7 +952,8 @@ class SAM2CameraPredictor(SAM2Base):
         prev_sam_mask_logits=None,
     ):
         """Run tracking on a single frame based on current inputs and previous memory."""
-        # Retrieve correct image features
+        # Retrieve correct image features, multiple feature-maps from backbone FPN
+        # ex: current_vision_feats -> [(1, 32, 120, 120), (1, 64, 60, 60), ...]
         (
             _,
             _,

@@ -134,7 +134,7 @@ class BoxDictionaryModel:
 
         self.labels = anno_2d
 
-    def update_boxes(self, tracking_annotation_dict, iou_threshold=0.8, objects_count=0):
+    def update_boxes(self, tracking_annotation_dict, iou_threshold=0.8, objects_count=0, keep_new=False):
         updated_boxes = {}
 
         for box_obj_id, box_info in self.labels.items():
@@ -154,6 +154,9 @@ class BoxDictionaryModel:
                     new_box_copy.x2 = box_info.x2
                     new_box_copy.y2 = box_info.y2
                     break
+                else:
+                    if keep_new:
+                        updated_boxes[object_info.instance_id] = object_info
 
             if not flag:
                 objects_count += 1
