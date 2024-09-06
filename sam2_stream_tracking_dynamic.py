@@ -15,6 +15,7 @@ from utils.mask_dictionary_model import BoxDictionaryModel, ObjectInfo
 import json
 import copy
 from pprint import pprint
+from termcolor import colored
 
 """
 Step 1: Environment settings and model initialization
@@ -36,6 +37,7 @@ print("config", model_cfg)
 print("device", device)
 
 video_predictor = build_sam2_camera_predictor(model_cfg, sam2_checkpoint)
+video_predictor.add_all_frames_to_correct_as_cond = True
 # sam2_image_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
 # image_predictor = SAM2ImagePredictor(sam2_image_model)
 
@@ -69,10 +71,11 @@ frame_names = [
     if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG"]
 ]
 frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+frame_names = frame_names[:70]
 
 # init video predictor state
 # inference_state = video_predictor.init_state(video_path=video_dir, offload_video_to_cpu=True, async_loading_frames=True)
-step = 200 # the step to sample frames for Grounding DINO predictor
+step = 9999 # the step to sample frames for Grounding DINO predictor
 
 sam2_masks = BoxDictionaryModel()
 PROMPT_TYPE_FOR_VIDEO = "mask" # box, mask or point
@@ -98,6 +101,55 @@ def object_detect(image):
     OBJECTS = results[0]["labels"]
     return input_boxes, OBJECTS
 
+def trim_sam2_mem(predictor: SAM2CameraPredictor, box_dict: BoxDictionaryModel, max_objs=25):
+    obj_ids = predictor.condition_state['obj_ids']
+    num_del = (len(obj_ids) - max_objs)
+    # predictor.condition_state['obj_id_to_idx']
+    # predictor.condition_state['obj_idx_to_id']
+
+    if num_del > 0:
+        print(colored("trim mem", color='red'))
+        for oid in obj_ids[:num_del]:
+            idx = predictor.condition_state['obj_id_to_idx'][oid]
+            del predictor.condition_state['obj_id_to_idx'][oid]
+            del predictor.condition_state['obj_idx_to_id'][idx]
+            del predictor.condition_state["point_inputs_per_obj"][idx]
+            del predictor.condition_state["mask_inputs_per_obj"][idx]
+            del predictor.condition_state["output_dict_per_obj"][idx]
+            del predictor.condition_state["temp_output_dict_per_obj"][idx]
+            box_dict.labels.pop(oid)
+        
+        # remap object indext from num_del~n back to 0~(n - num_del)
+        # NOTE: object indext(idx) is sequence of numbers which different from object id(object name)
+        condition_state = {
+            "point_inputs_per_obj": {},
+            "mask_inputs_per_obj": {},
+            "output_dict_per_obj": {},
+            "temp_output_dict_per_obj": {},
+        }
+        for i, oid in enumerate(obj_ids[num_del:]):
+            old_idx = predictor.condition_state['obj_id_to_idx'][oid]
+            del predictor.condition_state['obj_idx_to_id'][old_idx]
+            predictor.condition_state['obj_id_to_idx'][oid] = i
+            predictor.condition_state['obj_idx_to_id'][i] = oid
+
+            condition_state["point_inputs_per_obj"][i] = predictor.condition_state["point_inputs_per_obj"][old_idx]
+            condition_state["mask_inputs_per_obj"][i] = predictor.condition_state["mask_inputs_per_obj"][old_idx]
+            condition_state["output_dict_per_obj"][i] = predictor.condition_state["output_dict_per_obj"][old_idx]
+            condition_state["temp_output_dict_per_obj"][i] = predictor.condition_state["temp_output_dict_per_obj"][old_idx]
+        predictor.condition_state.update(**condition_state)
+
+        for storage in ['cond_frame_outputs', 'non_cond_frame_outputs']:
+            cond_outputs = predictor.condition_state["output_dict"][storage]
+            for t, out in cond_outputs.items():
+                out['obj_ptr'] = out['obj_ptr'][num_del:]
+                out['maskmem_features'] = out['maskmem_features'][num_del:]
+                for i, ten in enumerate(out["maskmem_pos_enc"]):
+                    out["maskmem_pos_enc"][i] = ten[num_del:]
+    
+        predictor.condition_state['obj_ids'] = obj_ids[num_del:]
+    return predictor.condition_state['obj_ids']
+
 
 def backfill_sam2_mem(predictor: SAM2CameraPredictor, frame: np.ndarray, mask_dict, out_obj_ids):
     "maskmem_features"
@@ -121,14 +173,15 @@ def backfill_sam2_mem(predictor: SAM2CameraPredictor, frame: np.ndarray, mask_di
     # mask_dict = tmp_dict
     
     for object_id, object_info in mask_dict.labels.items():
-        if object_id in out_obj_ids:
-            continue
-        frame_idx, out_obj_ids, out_mask_logits = video_predictor.add_new_prompt(
+        # if object_id in out_obj_ids:
+        #     continue
+        predictor.add_new_prompt(
             frame_idx=fid,
             obj_id=object_id,
             bbox=[[object_info.x1, object_info.y1], [object_info.x2, object_info.y2]],
         )
     print("objects_count", objects_count)
+    # predictor.propagate_in_video_preflight()
 
     for storage in ['cond_frame_outputs', 'non_cond_frame_outputs']:
         cond_outputs = predictor.condition_state["output_dict"][storage]
@@ -233,11 +286,15 @@ for start_frame_idx in range(0, len(frame_names), step):
                 number of objects after we insert new object.
             """
             mask_dict = backfill_sam2_mem(video_predictor, frame, mask_dict, out_obj_ids)
+            out_obj_ids, out_mask_logits = video_predictor.track(frame)
+            # out_obj_ids = trim_sam2_mem(video_predictor, mask_dict)
         else:
             out_obj_ids, out_mask_logits = video_predictor.track(frame)
         
-        print(f"[{fid}]")
-        pprint(video_predictor.condition_state['output_dict_per_obj'].keys())
+        print(colored(f"[{fid}]", color="green"))
+        # print(len(video_predictor.condition_state['output_dict_per_obj']), video_predictor.condition_state['output_dict_per_obj'].keys()) # obj_idx
+        # print(len(out_obj_ids), out_obj_ids)
+        print(video_predictor.condition_state["output_dict"]["non_cond_frame_outputs"].keys())
 
         frame_masks = BoxDictionaryModel()
         for i, out_obj_id in enumerate(out_obj_ids):
