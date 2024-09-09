@@ -71,7 +71,7 @@ frame_names = [
     if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG"]
 ]
 frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
-frame_names = frame_names[:70]
+frame_names = frame_names[:100]
 
 # init video predictor state
 # inference_state = video_predictor.init_state(video_path=video_dir, offload_video_to_cpu=True, async_loading_frames=True)
@@ -151,7 +151,7 @@ def trim_sam2_mem(predictor: SAM2CameraPredictor, box_dict: BoxDictionaryModel, 
     return predictor.condition_state['obj_ids']
 
 
-def backfill_sam2_mem(predictor: SAM2CameraPredictor, frame: np.ndarray, mask_dict, out_obj_ids):
+def backfill_sam2_mem(predictor: SAM2CameraPredictor, frame: np.ndarray, box_dict, fid):
     "maskmem_features"
     non_cond_frame_outputs = predictor.condition_state["output_dict"]['non_cond_frame_outputs']
     non_cond_frame_outputs = {k: v for k, v in non_cond_frame_outputs.items()} # shallow copy
@@ -161,18 +161,17 @@ def backfill_sam2_mem(predictor: SAM2CameraPredictor, frame: np.ndarray, mask_di
     input_boxes, OBJECTS = object_detect(Image.fromarray(frame))
     tmp_dict = BoxDictionaryModel()
     tmp_dict.add_new_frame_annotation(
-        box_list=torch.tensor(input_boxes), 
+        box_list=torch.tensor(input_boxes, dtype=torch.int32).tolist(), 
         label_list=OBJECTS
     )
-    objects_count = tmp_dict.update_boxes(
-        tracking_annotation_dict=mask_dict, 
-        iou_threshold=0.4, 
-        objects_count=objects_count, 
-        keep_new=True
+    objects_count = tmp_dict.mapping_boxes(
+        tracking_annotation_dict=box_dict, 
+        iou_threshold=0.2, 
+        objects_count=objects_count,
     )
-    # mask_dict = tmp_dict
+    # box_dict = tmp_dict
     
-    for object_id, object_info in mask_dict.labels.items():
+    for object_id, object_info in tmp_dict.labels.items():
         # if object_id in out_obj_ids:
         #     continue
         predictor.add_new_prompt(
@@ -209,11 +208,32 @@ def backfill_sam2_mem(predictor: SAM2CameraPredictor, frame: np.ndarray, mask_di
                     )
                     out["maskmem_pos_enc"][i] = torch.cat([ten, dummy])        
     
+    predictor.condition_state["consolidated_frame_inds"]["cond_frame_outputs"].add(fid)
+    predictor.propagate_cond_frame()
     # predictor.condition_state['images'][fid] = frame
     # predictor.condition_state["output_dict"]['non_cond_frame_outputs'] = non_cond_frame_outputs
     # predictor.frame_idx = max(non_cond_frame_outputs.keys())
     # predictor.propagate_in_video_preflight()
     return tmp_dict
+
+
+def sam2_mask_to_dict(fid, out_obj_ids, out_mask_logits):
+    global frame_names
+    frame_masks = BoxDictionaryModel()
+    for i, out_obj_id in enumerate(out_obj_ids):
+        out_mask = (out_mask_logits[i] > 0.0) # .cpu().numpy()
+        object_info = ObjectInfo(
+            instance_id = out_obj_id, 
+            mask = out_mask[0], 
+            class_name = mask_dict.get_target_class_name(out_obj_id)
+        )
+        object_info.update_box()
+        frame_masks.labels[out_obj_id] = object_info
+    image_base_name = frame_names[fid].split(".")[0]
+    frame_masks.box_name = f"mask_{image_base_name}.npy"
+    frame_masks.image_height = out_mask.shape[-2]
+    frame_masks.image_width = out_mask.shape[-1]
+    return frame_masks
 
 
 """
@@ -239,7 +259,7 @@ for start_frame_idx in range(0, len(frame_names), step):
     # If you are using point prompts, we uniformly sample positive points based on the mask
     if mask_dict.promote_type == "mask":
         mask_dict.add_new_frame_annotation(
-            box_list=torch.tensor(input_boxes), 
+            box_list=torch.tensor(input_boxes, dtype=torch.int32).tolist(), 
             label_list=OBJECTS
         )
     else:
@@ -285,34 +305,22 @@ for start_frame_idx in range(0, len(frame_names), step):
                 Find where to update `video_predictor.condition_state['cond_frame_outputs']` to right the
                 number of objects after we insert new object.
             """
-            mask_dict = backfill_sam2_mem(video_predictor, frame, mask_dict, out_obj_ids)
             out_obj_ids, out_mask_logits = video_predictor.track(frame)
-            # out_obj_ids = trim_sam2_mem(video_predictor, mask_dict)
+            mask_dict = sam2_mask_to_dict(fid - 1, out_obj_ids, out_mask_logits)
+            frame_masks = backfill_sam2_mem(video_predictor, frame, mask_dict, fid)
+            frame_masks.box_name = mask_dict.box_name
+            out_obj_ids = trim_sam2_mem(video_predictor, mask_dict)
         else:
             out_obj_ids, out_mask_logits = video_predictor.track(frame)
+            frame_masks = sam2_mask_to_dict(fid - 1, out_obj_ids, out_mask_logits)
         
         print(colored(f"[{fid}]", color="green"))
-        # print(len(video_predictor.condition_state['output_dict_per_obj']), video_predictor.condition_state['output_dict_per_obj'].keys()) # obj_idx
-        # print(len(out_obj_ids), out_obj_ids)
-        print(video_predictor.condition_state["output_dict"]["non_cond_frame_outputs"].keys())
-
-        frame_masks = BoxDictionaryModel()
-        for i, out_obj_id in enumerate(out_obj_ids):
-            out_mask = (out_mask_logits[i] > 0.0) # .cpu().numpy()
-            object_info = ObjectInfo(
-                instance_id = out_obj_id, 
-                mask = out_mask[0], 
-                class_name = mask_dict.get_target_class_name(out_obj_id)
-            )
-            object_info.update_box()
-            frame_masks.labels[out_obj_id] = object_info
-            image_base_name = frame_names[fid].split(".")[0]
-            frame_masks.box_name = f"mask_{image_base_name}.npy"
-            frame_masks.image_height = out_mask.shape[-2]
-            frame_masks.image_width = out_mask.shape[-1]
+        print(len(video_predictor.condition_state['output_dict_per_obj']), video_predictor.condition_state['output_dict_per_obj'].keys()) # obj_idx
+        print(len(out_obj_ids), out_obj_ids)
+        print("non_cond_frame_outputs: ", video_predictor.condition_state["output_dict"]["non_cond_frame_outputs"].keys())
 
         video_segments[fid] = frame_masks
-        sam2_masks = copy.deepcopy(frame_masks)
+        mask_dict = copy.deepcopy(frame_masks)
 
     print("video_segments:", len(video_segments))
     """

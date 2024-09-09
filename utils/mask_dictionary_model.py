@@ -156,7 +156,7 @@ class BoxDictionaryModel:
                     break
                 else:
                     if keep_new:
-                        updated_boxes[object_info.instance_id] = object_info
+                        updated_boxes[object_info.instance_id] = box_info
 
             if not flag:
                 objects_count += 1
@@ -168,6 +168,52 @@ class BoxDictionaryModel:
                 new_box_copy.x2 = box_info.x2
                 new_box_copy.y2 = box_info.y2
             updated_boxes[flag] = new_box_copy
+        self.labels = updated_boxes
+        return objects_count
+    
+    def mapping_boxes(self, tracking_annotation_dict, iou_threshold=0.8, objects_count=0, keep_new=False):
+        updated_boxes = {}
+        unmatch = set(o.instance_id for o in tracking_annotation_dict.labels.values())
+        
+        for box_obj_id, box_info in self.labels.items():
+            flag = 0
+            new_box_copy = ObjectInfo()
+            if (box_info.x2 - box_info.x1) * (box_info.y2 - box_info.y1) == 0:
+                continue
+
+            for object_id, object_info in tracking_annotation_dict.labels.items():
+                iou = self.calculate_iou(box_info, object_info)
+                if iou > iou_threshold:
+                    flag = object_info.instance_id
+                    new_box_copy.instance_id = object_info.instance_id
+                    new_box_copy.class_name = box_info.class_name
+                    new_box_copy.x1 = box_info.x1
+                    new_box_copy.y1 = box_info.y1
+                    new_box_copy.x2 = box_info.x2
+                    new_box_copy.y2 = box_info.y2
+                    unmatch.discard(flag)
+                    break
+
+            if not flag:
+                objects_count += 1
+                flag = objects_count
+                new_box_copy.instance_id = objects_count
+                new_box_copy.class_name = box_info.class_name
+                new_box_copy.x1 = box_info.x1
+                new_box_copy.y1 = box_info.y1
+                new_box_copy.x2 = box_info.x2
+                new_box_copy.y2 = box_info.y2
+            updated_boxes[flag] = new_box_copy
+        
+        for object_id, object_info in tracking_annotation_dict.labels.items():
+            flag = object_info.instance_id
+            if flag in unmatch:
+                object_info.x1 = 0
+                object_info.y1 = 0
+                object_info.x2 = 0
+                object_info.y2 = 0
+            updated_boxes[flag] = object_info
+        
         self.labels = updated_boxes
         return objects_count
 
