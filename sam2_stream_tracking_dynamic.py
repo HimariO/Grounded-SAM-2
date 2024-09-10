@@ -3,19 +3,22 @@ import cv2
 import torch
 import numpy as np
 import supervision as sv
+import json
+import copy
+from pprint import pprint
 from PIL import Image
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection 
+from termcolor import colored
+
 from sam2.build_sam import build_sam2_camera_predictor, build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.sam2_camera_predictor import SAM2CameraPredictor
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection 
+from sam2.modeling.sam2_base import NO_OBJ_SCORE
+
 from utils.track_utils import sample_points_from_masks
 from utils.video_utils import create_video_from_images
 from utils.common_utils import CommonUtils
 from utils.mask_dictionary_model import BoxDictionaryModel, ObjectInfo
-import json
-import copy
-from pprint import pprint
-from termcolor import colored
 
 """
 Step 1: Environment settings and model initialization
@@ -186,9 +189,16 @@ def backfill_sam2_mem(predictor: SAM2CameraPredictor, frame: np.ndarray, box_dic
         cond_outputs = predictor.condition_state["output_dict"][storage]
         obj_num = predictor._get_obj_num()
         for t, out in cond_outputs.items():
-            dummy_ptr = predictor._get_empty_mask_ptr(0)
+            # dummy_ptr = predictor._get_empty_mask_ptr(0)
             if obj_num - out["obj_ptr"].shape[0] > 0:
-                dummy_ptr = dummy_ptr.expand(obj_num - out["obj_ptr"].shape[0], -1)
+                # dummy_ptr = dummy_ptr.expand(obj_num - out["obj_ptr"].shape[0], -1)
+                # out["obj_ptr"] = torch.cat([out["obj_ptr"], dummy_ptr])
+                n, c = out["obj_ptr"].shape
+                dummy_ptr = torch.zeros(
+                    [obj_num - n, c], 
+                    dtype=out["obj_ptr"].dtype, 
+                    device=out["obj_ptr"].device
+                ) + NO_OBJ_SCORE
                 out["obj_ptr"] = torch.cat([out["obj_ptr"], dummy_ptr])
 
                 n, c, h, w = out["maskmem_features"].shape
@@ -201,12 +211,8 @@ def backfill_sam2_mem(predictor: SAM2CameraPredictor, frame: np.ndarray, box_dic
                 
                 for i, ten in enumerate(out["maskmem_pos_enc"]):
                     n, c, h, w = ten.shape
-                    dummy = torch.zeros(
-                        [obj_num - n, c, h, w], 
-                        dtype=ten.dtype, 
-                        device=ten.device
-                    )
-                    out["maskmem_pos_enc"][i] = torch.cat([ten, dummy])        
+                    extended = ten[:1].expand(obj_num, -1, -1, -1) # NOTE: position embed is independent to the input, so `ten[0] == ten[1] ... so on` is True.
+                    out["maskmem_pos_enc"][i] = extended
     
     predictor.condition_state["consolidated_frame_inds"]["cond_frame_outputs"].add(fid)
     predictor.propagate_cond_frame()

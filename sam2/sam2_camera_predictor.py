@@ -511,21 +511,22 @@ class SAM2CameraPredictor(SAM2Base):
                     # fill object pointer with a dummy pointer (based on an empty mask)
                     consolidated_out["obj_ptr"][obj_idx : obj_idx + 1] = empty_mask_ptr
                 continue
-            # Add the temporary object output mask to consolidated output mask
-            obj_mask = out["pred_masks"]
-            consolidated_pred_masks = consolidated_out[consolidated_mask_key]
-            if obj_mask.shape[-2:] == consolidated_pred_masks.shape[-2:]:
-                consolidated_pred_masks[obj_idx : obj_idx + 1] = obj_mask
             else:
-                # Resize first if temporary object mask has a different resolution
-                resized_obj_mask = torch.nn.functional.interpolate(
-                    obj_mask,
-                    size=consolidated_pred_masks.shape[-2:],
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                consolidated_pred_masks[obj_idx : obj_idx + 1] = resized_obj_mask
-            consolidated_out["obj_ptr"][obj_idx : obj_idx + 1] = out["obj_ptr"]
+                # Add the temporary object output mask to consolidated output mask
+                obj_mask = out["pred_masks"]
+                consolidated_pred_masks = consolidated_out[consolidated_mask_key]
+                if obj_mask.shape[-2:] == consolidated_pred_masks.shape[-2:]:
+                    consolidated_pred_masks[obj_idx : obj_idx + 1] = obj_mask
+                else:
+                    # Resize first if temporary object mask has a different resolution
+                    resized_obj_mask = torch.nn.functional.interpolate(
+                        obj_mask,
+                        size=consolidated_pred_masks.shape[-2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    consolidated_pred_masks[obj_idx : obj_idx + 1] = resized_obj_mask
+                consolidated_out["obj_ptr"][obj_idx : obj_idx + 1] = out["obj_ptr"]
 
         # Optionally, apply non-overlapping constraints on the consolidated scores
         # and rerun the memory encoder
