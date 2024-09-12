@@ -216,6 +216,17 @@ class BoxDictionaryModel:
         
         self.labels = updated_boxes
         return objects_count
+    
+    def fill_old_boxes(self, tracking_annotation_dict, iou_threshold=0.8, objects_count=0):
+        for object_id, object_info in tracking_annotation_dict.labels.items():
+            if object_info.instance_id not in self.labels:
+                self.labels[object_info.instance_id] = object_info
+                object_info.x1 = 0
+                object_info.y1 = 0
+                object_info.x2 = 0
+                object_info.y2 = 0
+                objects_count += 1
+        return objects_count
 
     def get_target_class_name(self, instance_id):
         return self.labels[instance_id].class_name

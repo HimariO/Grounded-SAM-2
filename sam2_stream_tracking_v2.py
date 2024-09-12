@@ -76,6 +76,17 @@ sam2_masks = BoxDictionaryModel()
 PROMPT_TYPE_FOR_VIDEO = "mask" # box, mask or point
 objects_count = 0
 
+def filter_small_box(labels, boxes, h, w):
+    new_labels = []
+    new_boxes = []
+    for lab, box in zip(labels, boxes):
+        area = (box[2] - box[0]) * (box[3] - box[1])
+        if area < h * w / 10000:
+            continue
+        new_boxes.append(box)
+        new_labels.append(lab)
+    return new_labels, torch.stack(new_boxes)
+
 """
 Step 2: Prompt Grounding DINO and SAM image predictor to get the box and mask for all frames
 """
@@ -109,6 +120,7 @@ for start_frame_idx in range(0, len(frame_names), step):
     input_boxes = results[0]["boxes"] # .cpu().numpy()
     # print("results[0]",results[0])
     OBJECTS = results[0]["labels"]
+    OBJECTS, input_boxes = filter_small_box(OBJECTS, input_boxes, image.size[1], image.size[0])
 
     """
     Step 3: Register each object's positive points to video predictor
@@ -127,7 +139,7 @@ for start_frame_idx in range(0, len(frame_names), step):
     """
     Step 4: Propagate the video predictor to get the segmentation results for each frame
     """
-    objects_count = init_dict.update_boxes(tracking_annotation_dict=sam2_masks, iou_threshold=0.4, objects_count=objects_count)
+    objects_count = init_dict.update_boxes(tracking_annotation_dict=sam2_masks, iou_threshold=0.3, objects_count=objects_count)
     print("objects_count", objects_count)
     # video_predictor.reset_state(inference_state)
     if len(init_dict.labels) == 0:
@@ -139,16 +151,24 @@ for start_frame_idx in range(0, len(frame_names), step):
     frame_path = os.path.join(video_dir, frame_names[start_frame_idx])
     frame = cv2.imread(frame_path)
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    video_predictor.load_first_frame(frame)
     
-    first_frame_masks = BoxDictionaryModel()
+    prev_dict = copy.deepcopy(init_dict)
     if prev_prompt_frame is not None:
+        video_predictor.load_first_frame(prev_prompt_frame)
+        video_predictor.load_first_frame(frame, frame_idx=1, init_state=False)
+        video_predictor.frame_idx = 1
+        video_predictor.condition_state["num_frames"] += 1
+        objects_count = init_dict.fill_old_boxes(tracking_annotation_dict=prev_dict, iou_threshold=0.3, objects_count=objects_count)
+        
         for object_id, object_info in prev_dict.labels.items():
             frame_idx, out_obj_ids, out_mask_logits = video_predictor.add_new_prompt(
                 frame_idx=0,
                 obj_id=object_id,
                 bbox=[[object_info.x1, object_info.y1], [object_info.x2, object_info.y2]],
             )
+    else:
+        video_predictor.load_first_frame(frame)
+
     for object_id, object_info in init_dict.labels.items():
         frame_idx, out_obj_ids, out_mask_logits = video_predictor.add_new_prompt(
             frame_idx=0 + int(prev_prompt_frame is not None),
@@ -158,15 +178,15 @@ for start_frame_idx in range(0, len(frame_names), step):
         print('add_new_prompt', out_obj_ids)
     
     prev_prompt_frame = frame
-    prev_dict = copy.deepcopy(init_dict)
 
     # for out_frame_idx, out_obj_ids, out_mask_logits in video_predictor.propagate_in_video(inference_state, max_frame_num_to_track=step, start_frame_idx=start_frame_idx):
-    for fid in range(start_frame_idx + 1, min(start_frame_idx + step, len(frame_names))):
+    for fid in range(start_frame_idx, min(start_frame_idx + step, len(frame_names))):
         frame_path = os.path.join(video_dir, frame_names[fid])
         frame = cv2.imread(frame_path)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        out_obj_ids, out_mask_logits = video_predictor.track(frame)
+        if fid > start_frame_idx:
+            out_obj_ids, out_mask_logits = video_predictor.track(frame)
 
         frame_masks = BoxDictionaryModel()
         for i, out_obj_id in enumerate(out_obj_ids):
