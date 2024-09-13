@@ -49,7 +49,8 @@ class CommonUtils:
                     all_object_masks.append(object_mask[None])
             
             # get n masks: (n, h, w)
-            all_object_masks = np.concatenate(all_object_masks, axis=0)
+            if len(all_object_masks):
+                all_object_masks = np.concatenate(all_object_masks, axis=0)
             
             # load box information
             file_path = os.path.join(json_path, "mask_"+raw_image_name.split(".")[0]+".json")
@@ -84,27 +85,32 @@ class CommonUtils:
             all_object_ids = [pair[0] for pair in sorted_pair]
             all_object_boxes = [pair[1] for pair in sorted_pair]
             
-            detections = sv.Detections(
-                xyxy=np.array(all_object_boxes),
-                mask=all_object_masks,
-                class_id=np.array(all_object_ids, dtype=np.int32),
-            )
+            if not all_object_boxes:
+                output_image_path = os.path.join(output_path, raw_image_name)
+                cv2.imwrite(output_image_path, image)
+                print(f"Annotated image saved as {output_image_path}")
+            else:
+                detections = sv.Detections(
+                    xyxy=np.array(all_object_boxes),
+                    mask=all_object_masks,
+                    class_id=np.array(all_object_ids, dtype=np.int32),
+                )
             
-            # custom label to show both id and class name
-            labels = [
-                f"{instance_id}: {class_name}" for instance_id, class_name in zip(all_object_ids, all_class_names)
-            ]
-            
-            box_annotator = sv.BoxAnnotator()
-            annotated_frame = box_annotator.annotate(scene=image.copy(), detections=detections)
-            label_annotator = sv.LabelAnnotator()
-            annotated_frame = label_annotator.annotate(annotated_frame, detections=detections, labels=labels)
-            mask_annotator = sv.MaskAnnotator()
-            annotated_frame = mask_annotator.annotate(scene=annotated_frame, detections=detections)
-            
-            output_image_path = os.path.join(output_path, raw_image_name)
-            cv2.imwrite(output_image_path, annotated_frame)
-            print(f"Annotated image saved as {output_image_path}")
+                # custom label to show both id and class name
+                labels = [
+                    f"{instance_id}: {class_name}" for instance_id, class_name in zip(all_object_ids, all_class_names)
+                ]
+                
+                box_annotator = sv.BoxAnnotator()
+                annotated_frame = box_annotator.annotate(scene=image.copy(), detections=detections)
+                label_annotator = sv.LabelAnnotator()
+                annotated_frame = label_annotator.annotate(annotated_frame, detections=detections, labels=labels)
+                mask_annotator = sv.MaskAnnotator()
+                annotated_frame = mask_annotator.annotate(scene=annotated_frame, detections=detections)
+                
+                output_image_path = os.path.join(output_path, raw_image_name)
+                cv2.imwrite(output_image_path, annotated_frame)
+                print(f"Annotated image saved as {output_image_path}")
 
     @staticmethod
     def draw_masks_and_box(raw_image_path, mask_path, json_path, output_path):
